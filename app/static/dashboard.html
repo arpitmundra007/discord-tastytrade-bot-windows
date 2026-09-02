@@ -25,7 +25,7 @@
   .main { flex: 1; min-width: 0; padding: 24px 28px; background: var(--panel); min-height: 520px; }
   .tab-panel { display: none; }
   .tab-panel.active { display: block; }
-  .cards { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin-bottom: 24px; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px; margin-bottom: 24px; }
   .card { background: var(--panel-raised); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; }
   .card-label { font-size: 11px; color: var(--ink-faint); letter-spacing: 0.5px; margin-bottom: 6px; }
   .card-value { font-size: 15px; font-weight: 600; font-family: var(--mono); }
@@ -85,6 +85,26 @@
         <div id="setupBanner" style="display:none;" class="info-box"></div>
         <div id="vaultStatusBox" style="display:none;" class="info-box"></div>
 
+        <div class="info-box" style="margin-bottom:24px;">
+          <div style="font-size:13px;font-weight:600;color:var(--ink);margin-bottom:12px;">Connected accounts</div>
+
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--border);">
+            <div>
+              <div style="font-size:12px;color:var(--ink-faint);margin-bottom:3px;">DISCORD</div>
+              <div id="discordIdentityLine" style="font-size:13px;"></div>
+            </div>
+            <button class="env-btn" id="disconnectDiscordBtn" onclick="confirmDisconnect('discord')" style="border-color:var(--red);color:var(--red);">Disconnect</button>
+          </div>
+
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 0 2px;">
+            <div>
+              <div style="font-size:12px;color:var(--ink-faint);margin-bottom:3px;">TASTYTRADE</div>
+              <div id="ttIdentityLine" style="font-size:13px;"></div>
+            </div>
+            <button class="env-btn" id="disconnectTtBtn" onclick="confirmDisconnect('tastytrade')" style="border-color:var(--red);color:var(--red);">Disconnect</button>
+          </div>
+        </div>
+
         <div class="field">
           <label class="field-label">Discord user token</label>
           <input type="text" id="discordUserToken" placeholder="Leave blank to keep current value">
@@ -130,6 +150,7 @@
 
       <div class="tab-panel active" id="tab-live">
         <div id="combinedModeBanner" style="display:none; border-radius:8px; padding:14px 16px; margin-bottom:16px; border:1px solid; font-size:13px; font-weight:600;"></div>
+        <div id="positionAlertBox" style="display:none; border-radius:8px; padding:14px 16px; margin-bottom:16px; border:1px solid var(--red); background:var(--red-dim); color:var(--red); font-size:13px;"></div>
         <div class="cards" id="statusCards"></div>
         <div id="ttErrorBox" class="info-box" style="display:none;"></div>
 
@@ -149,11 +170,37 @@
           <button class="save-btn" id="latencyTestBtn" onclick="testBrokerLatency()" style="white-space:nowrap;">Test now</button>
         </div>
 
+        <div class="info-box">
+          <div style="font-size:13px;font-weight:600;color:var(--ink);margin-bottom:2px;">Realistic signal execution timing</div>
+          <div style="font-size:12px;margin-bottom:10px;">
+            Paste a signal below and run it through the real pipeline end to end — real quote fetch, real option lookup, and a real Tastytrade order submission via <em>their own</em> preview mode (a genuine network round-trip through the same auth/validation/margin-calculation path a live order hits). This can never place a real order, no matter what mode the bot is in above — it's always Tastytrade's own dry_run preview for the final step. The one thing it can't measure is Discord's own message-delivery delay, since there's no real Discord message behind pasted-in text.
+          </div>
+          <textarea id="timingSignalInput" rows="3" style="width:100%;box-sizing:border-box;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--ink);font-family:var(--mono);font-size:13px;padding:8px;resize:vertical;" placeholder="Buy To Open&#10;Small&#10;NVDA 190P 07/31/2026  $2.22"></textarea>
+          <div style="margin-top:10px;">
+            <button class="save-btn" id="timingTestBtn" onclick="testExecutionTiming()">Run timing test (safe)</button>
+          </div>
+          <div id="timingResults" style="margin-top:12px;display:none;"></div>
+        </div>
+
         <div style="font-size:11px;color:var(--ink-faint);letter-spacing:1px;margin-bottom:10px;font-family:var(--mono);">
-          RECENT ACTIVITY
+          OPEN POSITIONS
         </div>
         <table>
-          <thead><tr><th>Time</th><th>Signal</th><th>Status</th><th>Detail</th><th>Latency</th></tr></thead>
+          <thead><tr><th>Opened</th><th>Contract</th><th>Size</th><th>Entry fill</th><th>Phase</th><th>Targets / stop</th></tr></thead>
+          <tbody id="positionsBody"></tbody>
+        </table>
+        <div id="positionsEmpty" class="empty" style="display:none;">No open positions being tracked right now.</div>
+
+        <div style="display:flex; align-items:baseline; justify-content:space-between; margin:24px 0 10px;">
+          <div style="font-size:11px;color:var(--ink-faint);letter-spacing:1px;font-family:var(--mono);">
+            RECENT ACTIVITY
+          </div>
+          <a href="/api/trades/export.csv" download style="font-size:12px;color:var(--amber);text-decoration:none;border:1px solid var(--border);padding:4px 10px;border-radius:6px;">
+            Export full log (CSV)
+          </a>
+        </div>
+        <table>
+          <thead><tr><th>Time</th><th>Signal</th><th>Status</th><th>Detail</th><th>Time to execute</th></tr></thead>
           <tbody id="tradesBody"></tbody>
         </table>
         <div id="tradesEmpty" class="empty" style="display:none;">No signals processed yet — this fills in as trades come through.</div>
@@ -201,10 +248,45 @@
           <div class="field">
             <label class="field-label">Take profit</label>
             <div class="row"><input type="number" id="takeProfitPct" min="0"><span style="color:var(--ink-dim);font-size:13px;">%</span></div>
+            <div class="field-hint">Only used when partial take-profit (below) is off — otherwise the two targets there replace this.</div>
           </div>
           <div class="field">
             <label class="field-label">Stop loss</label>
             <div class="row"><input type="number" id="stopLossPct" min="0"><span style="color:var(--ink-dim);font-size:13px;">%</span></div>
+          </div>
+        </div>
+
+        <div class="field">
+          <label class="field-label">Partial take-profit + move stop to breakeven</label>
+          <div class="row">
+            <button class="env-btn" id="partialTpOnBtn" onclick="setPartialTpEnabled(true)">On</button>
+            <button class="env-btn" id="partialTpOffBtn" onclick="setPartialTpEnabled(false)">Off</button>
+          </div>
+          <div class="field-hint">
+            ceil(contracts/2) close at the first target below; the instant that fills, the stop on what's left moves to your exact entry fill price and a second target is set for the rest. A 1-contract position has no remainder — it just exits at the first target. There's a brief, unavoidable gap between the first target filling and the follow-up order landing where the remainder is unprotected (Tastytrade has no order type that ties a stop move to a partial fill).
+          </div>
+        </div>
+
+        <div class="row-gap24" id="partialTpFields">
+          <div class="field">
+            <label class="field-label">First target (partial)</label>
+            <div class="row"><input type="number" id="partialTpPct" min="0"><span style="color:var(--ink-dim);font-size:13px;">%</span></div>
+          </div>
+          <div class="field">
+            <label class="field-label">Second target (runner, after breakeven)</label>
+            <div class="row"><input type="number" id="runnerTpPct" min="0"><span style="color:var(--ink-dim);font-size:13px;">%</span></div>
+          </div>
+        </div>
+
+        <div class="field">
+          <label class="field-label">Exit conditions</label>
+          <div class="row">
+            <button class="env-btn" id="exitModeOwnBtn" onclick="setExitMode('own')">My own (TP/SL above)</button>
+            <button class="env-btn" id="exitModeChannelBtn" onclick="setExitMode('channel')">Follow the channel</button>
+          </div>
+          <div class="field-hint">
+            <strong>My own:</strong> the bracket above runs on its own — channel "Close or Trim &amp; Set SL to BE" messages are logged and alerted, never auto-executed.<br>
+            <strong>Follow the channel:</strong> your own TP/SL above still rests as a baseline safety net, but a channel trim call jumps in and overrides it whenever one arrives — including a second or third trim on the same position, each sized against whatever's currently left, not the original entry size. Either way, a channel message never opens a new position — only your own BUY/BTO signals do that.
           </div>
         </div>
 
@@ -224,6 +306,37 @@
             <button class="env-btn" id="stopLimitBtn" onclick="setStopOrderType('stop_limit')">Stop-Limit</button>
           </div>
           <div class="field-hint" id="stopOrderTypeHint"></div>
+        </div>
+
+        <div class="field">
+          <label class="field-label">Check real buying power before submitting</label>
+          <div class="row">
+            <button class="env-btn" id="bpCheckOnBtn" onclick="setCheckBuyingPower(true)">On</button>
+            <button class="env-btn" id="bpCheckOffBtn" onclick="setCheckBuyingPower(false)">Off</button>
+          </div>
+          <div class="field-hint">
+            Adds one extra broker round-trip before every order (a free preview — no real order placed) to confirm your account can actually afford it. If it can't, the order is rejected with a specific reason ("$X needed, $Y available") instead of finding out reactively after a live submission attempt. Turn off only if that extra latency matters more to you than the specific reason — a broker rejection is still always caught and logged either way, just with whatever message Tastytrade happens to give.
+          </div>
+        </div>
+
+
+        <div class="field">
+          <label class="field-label">Quote pre-warming (latency optimization)</label>
+          <div class="row">
+            <button class="env-btn" id="prewarmOnBtn" onclick="setPrewarmEnabled(true)">On</button>
+            <button class="env-btn" id="prewarmOffBtn" onclick="setPrewarmEnabled(false)">Off</button>
+          </div>
+          <div class="field-hint">
+            Keeps a fixed watchlist's near-the-money option quotes already cached and streaming <em>before</em> a signal arrives, so a live signal on one of these symbols can skip both the option lookup and the wait-for-a-fresh-quote round trip to Tastytrade — the biggest lever if you're seeing high quote-fetch latency from outside North America. A symbol or strike outside this list still works exactly as before, it just doesn't get the speed-up. Refreshes every 5 minutes; each pass only fetches what's newly in range, so ongoing cost stays low after the first pass.
+          </div>
+        </div>
+
+        <div class="field" id="prewarmFields">
+          <label class="field-label">Watchlist symbols</label>
+          <input type="text" id="prewarmSymbols" placeholder="SPY, QQQ, TSLA, NVDA, GOOGL, SPCX, AMZN, MU, MSFT, META">
+          <div class="field-hint" style="margin-bottom:14px;">Comma-separated. Around 40 strikes each side of the current price, both calls and puts, are pre-warmed per symbol per expiration — a wide window, so keep this list to your actual most-traded names rather than a very long list, to avoid unnecessary subscription volume.</div>
+          <label class="field-label">Expirations covered</label>
+          <div class="row"><span style="color:var(--ink-dim);font-size:13px;">0 to</span><input type="number" id="prewarmMaxDte" min="0" max="14"><span style="color:var(--ink-dim);font-size:13px;">days to expiration</span></div>
         </div>
 
         <button class="save-btn" id="saveRiskBtn" onclick="saveRisk()">Save — applies immediately</button>
@@ -258,6 +371,38 @@ function setStopOrderType(type) {
   document.getElementById('stopOrderTypeHint').textContent = type === 'stop'
     ? 'Guaranteed to close the position once triggered, but the fill price could be worse than your stop level in a fast move.'
     : 'Bounded fill price, but risks not filling at all in a gap — leaving the position open and unprotected.';
+}
+
+let partialTpEnabled = true;
+function setPartialTpEnabled(enabled) {
+  partialTpEnabled = enabled;
+  document.getElementById('partialTpOnBtn').classList.toggle('active', enabled);
+  document.getElementById('partialTpOffBtn').classList.toggle('active', !enabled);
+  document.getElementById('partialTpFields').style.opacity = enabled ? '1' : '0.4';
+  document.getElementById('partialTpFields').style.pointerEvents = enabled ? 'auto' : 'none';
+}
+
+let checkBuyingPower = true;
+function setCheckBuyingPower(enabled) {
+  checkBuyingPower = enabled;
+  document.getElementById('bpCheckOnBtn').classList.toggle('active', enabled);
+  document.getElementById('bpCheckOffBtn').classList.toggle('active', !enabled);
+}
+
+let prewarmEnabled = true;
+function setPrewarmEnabled(enabled) {
+  prewarmEnabled = enabled;
+  document.getElementById('prewarmOnBtn').classList.toggle('active', enabled);
+  document.getElementById('prewarmOffBtn').classList.toggle('active', !enabled);
+  document.getElementById('prewarmFields').style.opacity = enabled ? '1' : '0.4';
+  document.getElementById('prewarmFields').style.pointerEvents = enabled ? 'auto' : 'none';
+}
+
+let exitMode = 'channel';
+function setExitMode(mode) {
+  exitMode = mode;
+  document.getElementById('exitModeOwnBtn').classList.toggle('active', mode === 'own');
+  document.getElementById('exitModeChannelBtn').classList.toggle('active', mode === 'channel');
 }
 
 function setSizingMode(mode) {
@@ -301,6 +446,20 @@ function renderSizeRows() {
 function addSizeRow(tag, contracts) { sizeTagMap.push({tag, contracts}); renderSizeRows(); }
 function removeSizeRow(i) { sizeTagMap.splice(i, 1); renderSizeRows(); }
 
+function renderPrewarmCard(pw) {
+  if (!pw.enabled) {
+    return `<div class="card"><div class="card-label">QUOTE PREWARM</div><div class="card-value"><span class="dot amber"></span>Off</div></div>`;
+  }
+  if (pw.last_error) {
+    return `<div class="card"><div class="card-label">QUOTE PREWARM</div><div class="card-value"><span class="dot red"></span>Error</div></div>`;
+  }
+  if (!pw.last_run_at) {
+    return `<div class="card"><div class="card-label">QUOTE PREWARM</div><div class="card-value"><span class="dot amber"></span>Warming up…</div></div>`;
+  }
+  const secsAgo = Math.max(0, Math.floor(Date.now() / 1000 - pw.last_run_at));
+  return `<div class="card"><div class="card-label">QUOTE PREWARM</div><div class="card-value"><span class="dot green"></span>${pw.warmed_contracts} contracts</div><div style="font-size:10px;color:var(--ink-faint);margin-top:4px;">Refreshed ${secsAgo}s ago</div></div>`;
+}
+
 async function fetchStatus() {
   try {
     const res = await fetch('/api/status');
@@ -329,8 +488,19 @@ async function fetchStatus() {
       <div class="card"><div class="card-label">ACCOUNT</div><div class="card-value">${isSandbox ? 'Sandbox' : 'Live'}</div></div>
       <div class="card"><div class="card-label">TRADING</div><div class="card-value"><span class="dot ${s.paused ? 'red' : 'green'}"></span>${s.paused ? 'Paused' : 'Running'}</div></div>
       <div class="card"><div class="card-label">QUOTE STREAM</div><div class="card-value"><span class="dot ${s.stream_connected ? 'green' : (s.tastytrade_error ? 'red' : 'amber')}"></span>${s.stream_connected ? 'Connected' : (s.tastytrade_error ? 'Failed' : 'Connecting…')}</div></div>
+      <div class="card"><div class="card-label">POSITION TRACKING</div><div class="card-value"><span class="dot ${s.position_stream_connected ? 'green' : (s.position_stream_error ? 'red' : 'amber')}"></span>${s.position_stream_connected ? 'Connected' : (s.position_stream_error ? 'Failed' : 'Connecting…')}</div></div>
       <div class="card"><div class="card-label">UPTIME</div><div class="card-value">${Math.floor(s.uptime_seconds / 60)}m</div></div>
+      ${renderPrewarmCard(s.prewarm || {})}
     `;
+
+    const alertBox = document.getElementById('positionAlertBox');
+    if (s.position_alert) {
+      alertBox.style.display = 'block';
+      alertBox.innerHTML = `<strong>⚠ Position may need manual attention:</strong> ${s.position_alert}` +
+        `<div style="margin-top:8px;"><button class="save-btn" style="border-color:var(--red);color:var(--red);background:transparent;" onclick="dismissPositionAlert()">I checked Tastytrade directly — dismiss</button></div>`;
+    } else {
+      alertBox.style.display = 'none';
+    }
 
     const ttErrorBox = document.getElementById('ttErrorBox');
     if (s.discord_error) {
@@ -364,6 +534,31 @@ async function fetchStatus() {
       title.textContent = 'Trading active'; title.style.color = 'var(--green)';
       desc.textContent = 'Approved signals will execute normally.';
       btn.className = 'kill-btn pause'; btn.textContent = 'Pause trading';
+    }
+
+    const discordLine = document.getElementById('discordIdentityLine');
+    if (s.discord_connected) {
+      discordLine.innerHTML = `<span class="dot green"></span>Logged in as <strong style="color:var(--ink);">${s.discord_identity}</strong>`;
+      document.getElementById('disconnectDiscordBtn').style.display = 'inline-block';
+    } else if (s.has_discord_token) {
+      discordLine.innerHTML = `<span class="dot amber"></span>Token saved, not connected yet${s.discord_error ? ' — ' + s.discord_error : ''}`;
+      document.getElementById('disconnectDiscordBtn').style.display = 'inline-block';
+    } else {
+      discordLine.innerHTML = `<span class="dot red"></span>Not connected`;
+      document.getElementById('disconnectDiscordBtn').style.display = 'none';
+    }
+
+    const ttLine = document.getElementById('ttIdentityLine');
+    if (s.tt_connected) {
+      const label = s.tt_account_nickname ? `${s.tt_account_nickname} (${s.tt_account_number})` : s.tt_account_number;
+      ttLine.innerHTML = `<span class="dot green"></span>Connected to <strong style="color:var(--ink);">${label}</strong> (${s.tt_env === 'live' ? 'Live' : 'Sandbox'})`;
+      document.getElementById('disconnectTtBtn').style.display = 'inline-block';
+    } else if (s.has_tt_credentials) {
+      ttLine.innerHTML = `<span class="dot amber"></span>Credentials saved, not connected yet${s.tastytrade_error ? ' — ' + s.tastytrade_error : ''}`;
+      document.getElementById('disconnectTtBtn').style.display = 'inline-block';
+    } else {
+      ttLine.innerHTML = `<span class="dot red"></span>Not connected`;
+      document.getElementById('disconnectTtBtn').style.display = 'none';
     }
 
     const banner = document.getElementById('setupBanner');
@@ -407,12 +602,20 @@ async function fetchStatus() {
       document.getElementById('maxContractsCap').value = s.risk.max_contracts_hard_cap;
       document.getElementById('takeProfitPct').value = s.risk.take_profit_pct;
       document.getElementById('stopLossPct').value = s.risk.stop_loss_pct;
+      document.getElementById('partialTpPct').value = s.risk.partial_tp_pct;
+      document.getElementById('runnerTpPct').value = s.risk.runner_tp_pct;
+      setPartialTpEnabled(!!s.risk.partial_tp_enabled);
+      setCheckBuyingPower(!!s.risk.check_buying_power_before_order);
+      setExitMode(s.risk.exit_mode || 'channel');
       document.getElementById('budgetUsd').value = s.risk.budget_usd;
       setSizingMode(s.risk.sizing_mode);
       setEntryOrderType(s.risk.entry_order_type);
       setStopOrderType(s.risk.stop_order_type);
       sizeTagMap = Object.entries(s.risk.size_tag_map).map(([tag, contracts]) => ({tag, contracts}));
       renderSizeRows();
+      setPrewarmEnabled(!!s.risk.prewarm_enabled);
+      document.getElementById('prewarmSymbols').value = (s.risk.prewarm_symbols || []).join(', ');
+      document.getElementById('prewarmMaxDte').value = s.risk.prewarm_max_dte;
       window._riskLoaded = true;
     }
   } catch (e) {
@@ -423,7 +626,7 @@ async function fetchStatus() {
 async function saveSetupAndRestart() {
   const btn = document.getElementById('saveSetupBtn');
   btn.textContent = 'Saving…';
-  const ids = document.getElementById('channelIds').value.split(',').map(s => s.trim()).filter(Boolean).map(Number);
+  const ids = document.getElementById('channelIds').value.split(',').map(s => s.trim()).filter(Boolean);
   const payload = {
     discord_signal_channel_ids: ids,
     tt_env: ttEnv,
@@ -479,6 +682,65 @@ async function testBrokerLatency() {
   setTimeout(() => { btn.textContent = original; btn.style.color = ''; btn.disabled = false; }, 4000);
 }
 
+async function testExecutionTiming() {
+  const btn = document.getElementById('timingTestBtn');
+  const input = document.getElementById('timingSignalInput');
+  const results = document.getElementById('timingResults');
+  const text = input.value.trim();
+  if (!text) { input.focus(); return; }
+
+  btn.textContent = 'Running…'; btn.disabled = true;
+  results.style.display = 'none';
+
+  try {
+    const res = await fetch('/api/test-execution-timing', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({text}),
+    });
+    const d = await res.json();
+    results.style.display = 'block';
+
+    if (d.error) {
+      results.innerHTML = `<div style="color:var(--red);font-size:13px;">${d.error}</div>` +
+        (d.timing ? `<div style="font-size:12px;color:var(--ink-dim);margin-top:6px;">Parse: ${d.timing.parse_ms}ms</div>` : '');
+    } else if (d.approved === false) {
+      results.innerHTML = `<div style="color:var(--red);font-size:13px;margin-bottom:8px;">Rejected: ${d.reason}</div>` + renderTimingRows(d.timing);
+    } else {
+      const op = d.order_preview || {};
+      const bpLine = op.buying_power_required != null
+        ? `<div style="font-size:12px;color:var(--ink-dim);margin-top:8px;">Would require $${op.buying_power_required.toFixed(2)} of your $${op.current_buying_power.toFixed(2)} buying power${op.would_be_rejected ? ' — <span style="color:var(--red);">Tastytrade would reject this</span>' : ''}</div>`
+        : '';
+      const msgLine = (op.broker_messages || []).length ? `<div style="font-size:12px;color:var(--amber);margin-top:4px;">${op.broker_messages.join('; ')}</div>` : '';
+      results.innerHTML =
+        `<div style="font-size:13px;color:var(--green);margin-bottom:8px;">${d.signal.symbol} ${d.signal.strike}${d.signal.option_type} exp ${d.signal.expiration} — ${d.decision.contracts} contract(s) @ ~$${d.decision.entry_limit_price}</div>` +
+        renderTimingRows(d.timing) + bpLine + msgLine +
+        `<div style="font-size:11px;color:var(--ink-faint);margin-top:10px;">${d.note}</div>`;
+    }
+  } catch (e) {
+    results.style.display = 'block';
+    results.innerHTML = `<div style="color:var(--red);font-size:13px;">Request failed: ${e}</div>`;
+  }
+  btn.textContent = 'Run timing test (safe)'; btn.disabled = false;
+}
+
+function renderTimingRows(timing) {
+  if (!timing) return '';
+  const rows = [
+    ['Parse', timing.parse_ms],
+    ['Live quote fetch', timing.quote_fetch_ms],
+    ['Risk evaluation', timing.risk_eval_ms],
+    ['Option lookup + order submission (real network)', timing.order_preview_ms],
+  ].filter(([, v]) => v !== undefined);
+  const rowsHtml = rows.map(([label, ms]) => `
+    <div style="display:flex;justify-content:space-between;font-size:12px;padding:3px 0;">
+      <span style="color:var(--ink-dim);">${label}</span><span style="font-family:var(--mono);">${ms}ms</span>
+    </div>`).join('');
+  const totalHtml = timing.total_ms !== undefined ? `
+    <div style="display:flex;justify-content:space-between;font-size:13px;font-weight:600;padding:6px 0 0;border-top:1px solid var(--border);margin-top:4px;">
+      <span>Total</span><span style="font-family:var(--mono);">${timing.total_ms}ms</span>
+    </div>` : '';
+  return `<div>${rowsHtml}${totalHtml}</div>`;
+}
+
 async function toggleKillSwitch() {
   const endpoint = currentlyPaused ? '/api/resume' : '/api/pause';
   await fetch(endpoint, {method: 'POST'});
@@ -494,15 +756,67 @@ async function saveRisk() {
     max_contracts_hard_cap: Number(document.getElementById('maxContractsCap').value),
     take_profit_pct: Number(document.getElementById('takeProfitPct').value),
     stop_loss_pct: Number(document.getElementById('stopLossPct').value),
+    partial_tp_enabled: partialTpEnabled,
+    partial_tp_pct: Number(document.getElementById('partialTpPct').value),
+    runner_tp_pct: Number(document.getElementById('runnerTpPct').value),
     size_tag_map: Object.fromEntries(sizeTagMap.filter(r => r.tag).map(r => [r.tag, r.contracts])),
     sizing_mode: sizingMode,
     budget_usd: Number(document.getElementById('budgetUsd').value),
     entry_order_type: entryOrderType,
     stop_order_type: stopOrderType,
+    check_buying_power_before_order: checkBuyingPower,
+    exit_mode: exitMode,
+    prewarm_enabled: prewarmEnabled,
+    prewarm_symbols: document.getElementById('prewarmSymbols').value.split(',').map(s => s.trim().toUpperCase()).filter(Boolean),
+    prewarm_max_dte: Number(document.getElementById('prewarmMaxDte').value),
   };
   await fetch('/api/settings', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
   btn.textContent = 'Saved — live now'; btn.classList.add('saved');
   setTimeout(() => { btn.textContent = 'Save — applies immediately'; btn.classList.remove('saved'); }, 1800);
+}
+
+async function dismissPositionAlert() {
+  await fetch('/api/positions/clear-alert', {method: 'POST'});
+  fetchStatus();
+}
+
+const PHASE_LABEL = {
+  bracket1_live: 'Working (entry + TP1/SL)',
+  manual_trim_pending: 'Trim ordered — awaiting fill',
+  partial_filled: 'Partial filled — breakeven stop live',
+  needs_attention: '⚠ Needs attention',
+  closed: 'Closed',
+};
+
+async function fetchPositions() {
+  try {
+    const res = await fetch('/api/positions?limit=30');
+    const {open} = await res.json();
+    const body = document.getElementById('positionsBody');
+    const empty = document.getElementById('positionsEmpty');
+    if (!open.length) { body.innerHTML = ''; empty.style.display = 'block'; return; }
+    empty.style.display = 'none';
+    body.innerHTML = open.map(p => {
+      const opened = new Date(p.created_at + 'Z').toLocaleTimeString();
+      const contract = `${p.symbol} ${p.strike}${p.option_type} ${p.expiration}`;
+      const size = p.phase === 'partial_filled'
+        ? `${p.total_contracts} → ${p.runner_contracts} running`
+        : `${p.total_contracts} (${p.partial_contracts} @ target 1)`;
+      const fill = p.entry_avg_fill_price != null ? `$${p.entry_avg_fill_price.toFixed(2)}` : 'pending…';
+      const phaseColor = p.phase === 'needs_attention' ? 'var(--red)' : (p.phase === 'partial_filled' ? 'var(--green)' : 'var(--ink-dim)');
+      const targets = p.phase === 'partial_filled'
+        ? `Stop @ breakeven, target ${p.tp2_order_id ? 'live' : '—'}`
+        : `TP1 + initial stop working`;
+      return `<tr>
+        <td>${opened}</td>
+        <td class="symbol">${contract}</td>
+        <td>${size}</td>
+        <td>${fill}</td>
+        <td style="color:${phaseColor};">${PHASE_LABEL[p.phase] || p.phase}</td>
+        <td>${targets}</td>
+      </tr>`;
+    }).join('');
+  } catch (e) {}
 }
 
 async function fetchTrades() {
@@ -520,32 +834,64 @@ async function fetchTrades() {
         : t.reason;
       const time = new Date(t.ts + 'Z').toLocaleTimeString();
       const timing = t.order_payload && t.order_payload.timing;
-      let latencyCell = '—';
+      let timingCell = '—';
       if (timing) {
-        const tooltip = [
-          `Discord \u2192 received: ${timing.posted_to_received_ms}ms`,
-          `Parse: ${timing.parse_ms}ms${timing.used_llm_fallback ? ' (LLM fallback)' : ''}`,
-          `Quote fetch: ${timing.quote_fetch_ms}ms`,
-          `Risk eval: ${timing.risk_eval_ms}ms`,
-          timing.order_submit_ms !== undefined ? `Order submit: ${timing.order_submit_ms}ms` : null,
-        ].filter(Boolean).join('\n');
-        latencyCell = `<span title="${tooltip}" style="cursor:help;border-bottom:1px dotted var(--ink-faint);">${timing.total_ms}ms</span>`;
+        const clockSkew = timing.posted_to_received_ms < -500;
+        const breakdown = [
+          `Discord→bot ${timing.posted_to_received_ms}ms${clockSkew ? ' ⚠ clock sync?' : ''}`,
+          `parse ${timing.parse_ms}ms${timing.used_llm_fallback ? ' (LLM)' : ''}`,
+          `quote ${timing.quote_fetch_ms}ms`,
+          `risk ${timing.risk_eval_ms}ms`,
+          timing.order_submit_ms !== undefined ? `order ${timing.order_submit_ms}ms` : null,
+        ].filter(Boolean).join(' · ');
+        timingCell = `<div>${timing.total_ms}ms</div><div style="font-size:10px;color:${clockSkew ? 'var(--red)' : 'var(--ink-faint)'};margin-top:2px;">${breakdown}</div>`;
       }
       return `<tr>
         <td>${time}</td>
         <td class="symbol">${sym}</td>
         <td><span class="badge ${t.approved ? 'approved' : 'rejected'}">${t.approved ? 'Approved' : 'Rejected'}</span></td>
         <td>${detail}</td>
-        <td>${latencyCell}</td>
+        <td>${timingCell}</td>
       </tr>`;
     }).join('');
   } catch (e) {}
 }
 
 let isShuttingDown = false;
-function tick() { if (!isShuttingDown) { fetchStatus(); fetchTrades(); } }
+function tick() { if (!isShuttingDown) { fetchStatus(); fetchTrades(); fetchPositions(); } }
 let pollTimer = setInterval(tick, 3000);
 tick();
+
+function confirmDisconnect(which) {
+  const isDiscord = which === 'discord';
+  const message = isDiscord
+    ? "Disconnect this Discord account?\n\nThis clears the saved token and restarts the app. You'll need to paste in a token (the same one or a different account's) on this page to reconnect. Signal channel IDs stay configured."
+    : "Disconnect this Tastytrade account?\n\nThis clears the saved client secret, refresh token, and account number, then restarts the app. Reconnecting afterward requires a fresh OAuth grant at developer.tastytrade.com — it's not just re-pasting a value. This does NOT cancel any live orders or close any open positions on Tastytrade's side; those are broker-side and unaffected by whether this app is connected.";
+  if (confirm(message)) doDisconnect(which);
+}
+
+async function doDisconnect(which) {
+  const btnId = which === 'discord' ? 'disconnectDiscordBtn' : 'disconnectTtBtn';
+  const btn = document.getElementById(btnId);
+  btn.textContent = 'Disconnecting…';
+  btn.disabled = true;
+  try {
+    await fetch(`/api/disconnect-${which}`, { method: 'POST' });
+  } catch (e) {}
+
+  let attempts = 0;
+  const poll = setInterval(async () => {
+    attempts++;
+    try {
+      const res = await fetch('/health');
+      if (res.ok) { clearInterval(poll); location.reload(); }
+    } catch (e) {}
+    if (attempts > 30) {
+      clearInterval(poll);
+      btn.textContent = 'Not back yet — check your terminal';
+    }
+  }, 1000);
+}
 
 function confirmShutdown() {
   const ok = confirm(
