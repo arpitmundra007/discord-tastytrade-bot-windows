@@ -94,6 +94,7 @@ def _dotenv():
 
 @check("This project's own app/ package")
 def _own_app():
+    from datetime import date
     from app.config import settings
     from app.signal_parser import parse_signal
     from app.risk_engine import evaluate
@@ -101,8 +102,15 @@ def _own_app():
     from app.llm_parser import parse_signal_with_llm, to_parsed_signal
     from app.db import log_trade, get_recent_trades
     from app.runtime_state import is_paused
-    # a real parse, not just an import, to catch any regex/logic breakage too
-    result = parse_signal("Buy To Open\nLOTTO SIZE / SMALL\nSPY 731P  0DTE $1.7")
+    from app.quote_prewarmer import quote_prewarmer
+    # a real parse, not just an import, to catch any regex/logic breakage too.
+    # Pin `today` to a fixed, known weekday (2026-01-05, a Monday) rather than
+    # the real current date - a 0DTE signal is correctly rejected if "today"
+    # falls on a weekend (an option can't expire on a Sat/Sun), so leaving
+    # this on the real date meant this check would spuriously fail on any
+    # actual Saturday or Sunday, regardless of whether anything was actually
+    # broken.
+    result = parse_signal("Buy To Open\nLOTTO SIZE / SMALL\nSPY 731P  0DTE $1.7", today=date(2026, 1, 5))
     assert result is not None and result.symbol == "SPY", "signal parser produced an unexpected result"
 
 
