@@ -60,7 +60,7 @@ from datetime import date
 from tastytrade.instruments import NestedOptionChain
 from tastytrade.market_data import get_market_data_by_type
 
-from app.config import settings
+from app.config import settings, redact_secrets
 from app.tastytrade_client import tastytrade_client, occ_symbol
 
 log = logging.getLogger("quote_prewarmer")
@@ -84,6 +84,41 @@ REFRESH_INTERVAL_SECONDS = 5 * 60
 # ground to cover) doesn't fire thousands of simultaneous requests at once.
 FETCH_CONCURRENCY = 15
 
+# Retry delay used specifically when Tastytrade isn't connected yet (see
+# _NotConnectedYet below) - deliberately much shorter than
+# REFRESH_INTERVAL_SECONDS. This case is expected to resolve within
+# seconds during normal startup (see the race condition explained on
+# _NotConnectedYet below), not something that benefits from a 5-minute
+# wait - using the long interval here would leave the dashboard showing a
+# stale "Error" card for up to 5 minutes after the real problem already
+# resolved, which is confirmed to have actually happened in practice.
+STARTUP_RETRY_DELAY_SECONDS = 15
+
+
+class _NotConnectedYet(Exception):
+    """
+    Raised internally by _run_once() when Tastytrade hasn't connected yet.
+    Caught separately in _loop() to use STARTUP_RETRY_DELAY_SECONDS instead
+    of the full REFRESH_INTERVAL_SECONDS - a distinct exception type rather
+    than just checking the message string, so this fast-retry path can't
+    accidentally also catch some OTHER, unrelated failure that happens to
+    use similar wording.
+
+    Why this case needs special handling: quote_prewarmer.start() is
+    deliberately called BEFORE tastytrade_client.connect() in
+    discord_selfbot.py's on_ready() (so a connect failure doesn't
+    permanently disable the prewarmer for the process's whole life - see
+    that file's own comment). But starting the background task early means
+    its very first pass can genuinely run WHILE that connect() call is
+    still in progress on a real account (confirmed directly, not
+    theoretical: the connect() call's own network I/O is exactly the kind
+    of await point that lets the newly-scheduled task get its first turn) -
+    session/account are still None at that exact moment, even though the
+    connection succeeds moments later. Without this fast-retry path, that
+    one-time startup race would leave the dashboard showing a stale
+    "Error" long after Tastytrade actually connected successfully.
+    """
+
 
 def _expirations_within_dte(chain_expirations, max_dte: int):
     """Every expiration Tastytrade's own chain response lists with
@@ -91,6 +126,40 @@ def _expirations_within_dte(chain_expirations, max_dte: int):
     rather than generating a calendar and guessing one exists for every
     day, which would break on a day with no 0DTE contract listed at all."""
     return [e for e in chain_expirations if 0 <= e.days_to_expiration <= max_dte]
+
+
+async def _diagnose_market_data_failure(symbols: list[str]) -> str:
+    """
+    Bypasses the tastytrade SDK's own response validation to surface the
+    RAW HTTP status and body Tastytrade actually sent back - used only as
+    a fallback when that validation itself crashes (see the AttributeError
+    handling in _run_once() below).
+
+    Why this is needed: the SDK's validate_response() (v13.2.2's utils.py)
+    assumes any non-2xx JSON response body is a dict with an "error" key,
+    then calls .get("error") on it. Confirmed directly against the SDK
+    source that Tastytrade can return an error response whose JSON body is
+    instead a plain STRING - triggering exactly "'str' object has no
+    attribute 'get'" instead of a real error message. That's a bug in how
+    the SDK explains an error, not necessarily evidence of what the
+    underlying error actually is - this function re-issues the same
+    request directly against the session's own underlying HTTP client
+    (bypassing the SDK's broken parsing entirely) so the actual status
+    code and message Tastytrade sent can be shown instead of a confusing
+    Python crash.
+
+    Mirrors tastytrade.market_data.get_market_data_by_type()'s exact
+    request shape (same URL, same params) so this is a faithful
+    reproduction of the request that failed, not a different one.
+    """
+    try:
+        response = await tastytrade_client.session._client.get(
+            "/market-data/by-type", params={"equity": symbols}
+        )
+        body_preview = response.text[:300]
+        return f"HTTP {response.status_code}: {body_preview}"
+    except Exception as diag_e:
+        return f"(couldn't get a raw response for diagnosis either: {diag_e})"
 
 
 def _nearest_strikes(strikes, underlying_price: float, each_side: int):
@@ -131,12 +200,13 @@ class QuotePrewarmer:
         }
 
     def start(self):
-        """Call once at startup, after tastytrade_client.connect() and
-        start_streaming() have both succeeded - this needs a live session
-        for the REST chain/market-data calls and a live DXLink connection
-        for subscriptions to actually take effect immediately (if the
-        stream isn't ready yet, subscribe_many() still registers the
-        symbols for the stream's own reconnect logic to pick up)."""
+        """Call once at startup (see discord_selfbot.py's on_ready(),
+        which calls this BEFORE attempting the Tastytrade connection, not
+        after - so a connect failure can't permanently disable this
+        background task for the process's whole life). _run_once() itself
+        checks for a live Tastytrade session and handles "not connected
+        yet" gracefully with a fast retry (see _NotConnectedYet), so it's
+        safe to start this before a connection exists."""
         if self._task is None:
             self._task = asyncio.create_task(self._loop())
 
@@ -147,8 +217,18 @@ class QuotePrewarmer:
                     await self._run_once()
                 except asyncio.CancelledError:
                     raise
+                except _NotConnectedYet as e:
+                    # Expected during normal startup (see _NotConnectedYet's
+                    # own docstring) - retries quickly rather than waiting
+                    # the full refresh interval, so a real, successful
+                    # connection doesn't leave the dashboard showing a
+                    # stale-looking error for minutes after the actual
+                    # problem already resolved.
+                    self._last_error = redact_secrets(str(e))
+                    await asyncio.sleep(STARTUP_RETRY_DELAY_SECONDS)
+                    continue
                 except Exception as e:
-                    self._last_error = str(e)
+                    self._last_error = redact_secrets(str(e))
                     log.exception("Quote prewarming pass failed - live signals still work normally, "
                                   "they just won't benefit from a warm cache until this recovers")
             await asyncio.sleep(REFRESH_INTERVAL_SECONDS)
@@ -159,7 +239,51 @@ class QuotePrewarmer:
         if not symbols:
             return
 
-        underlying_data = await get_market_data_by_type(tastytrade_client.session, equities=symbols)
+        if tastytrade_client.session is None or tastytrade_client.account is None:
+            # Not an error condition worth alarming over - just means
+            # Tastytrade hasn't connected yet (startup still in progress,
+            # or a connection attempt failed - check the Live tab's own
+            # Tastytrade error banner for why). Raised as an exception
+            # (rather than silently returning) so it's still visible in
+            # status() as a clear, specific last_error instead of the card
+            # just looking perpetually stuck on "Warming up..." with no
+            # explanation - but as _NotConnectedYet specifically, so
+            # _loop() retries quickly instead of waiting the full refresh
+            # interval (see _NotConnectedYet's own docstring for why that
+            # distinction matters).
+            raise _NotConnectedYet(
+                "Tastytrade isn't connected yet, so there's no session to fetch quotes with. "
+                "This will resolve on its own once Tastytrade connects - check the Live tab's "
+                "Tastytrade connection status/error for why it hasn't yet."
+            )
+
+        try:
+            underlying_data = await get_market_data_by_type(tastytrade_client.session, equities=symbols)
+        except AttributeError as e:
+            # Confirmed: a bug in the tastytrade SDK's own error-response
+            # parsing (see _diagnose_market_data_failure's docstring) -
+            # this is the SDK crashing while trying to explain an error,
+            # not the error message itself. Falls back to a raw request
+            # that bypasses the SDK's broken parsing, so the actual
+            # HTTP status/body Tastytrade sent is visible here instead.
+            diagnosis = await _diagnose_market_data_failure(symbols)
+            raise RuntimeError(
+                f"Tastytrade's client library hit a known parsing bug trying to report an "
+                f"error for {symbols} (not something wrong in this app's own code) - the "
+                f"actual response was {diagnosis}. If that mentions funding, approval, or "
+                f"entitlement, Tastytrade is restricting market data until your account "
+                f"status is resolved - check tastytrade.com. This will retry automatically "
+                f"in {REFRESH_INTERVAL_SECONDS // 60} minutes regardless."
+            ) from e
+        except Exception as e:
+            raise RuntimeError(
+                f"Couldn't fetch underlying prices for {symbols} from Tastytrade: {e}. If your "
+                f"account is unfunded or not yet approved for market data, Tastytrade may be "
+                f"restricting this until that's resolved on their end - check your account "
+                f"status at tastytrade.com. This will retry automatically in "
+                f"{REFRESH_INTERVAL_SECONDS // 60} minutes regardless."
+            ) from e
+
         underlying_prices: dict[str, float] = {}
         for md in underlying_data:
             price = md.mark if md.mark is not None else (md.last if md.last is not None else md.mid)
